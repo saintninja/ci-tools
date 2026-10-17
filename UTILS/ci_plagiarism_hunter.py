@@ -158,7 +158,26 @@ def first_commit_info(path: str, repo_root: str):
         pass
     return None
 
-def describe_files(paths, repo_root):
+ZERO_SHA = '0' * 40
+
+def get_changed_files(repo_root, event_name, base_ref, before_sha):
+    if event_name == 'pull_request' and base_ref:
+        diff_args = [f'origin/{base_ref}...HEAD']
+    elif event_name != 'pull_request' and before_sha and before_sha != ZERO_SHA:
+        diff_args = [before_sha, 'HEAD']
+    else:
+        return None
+    try:
+        out = subprocess.run(
+            ['git', '-C', repo_root, 'diff', '--name-only', '--diff-filter=ACMR', '-z', *diff_args],
+            capture_output=True, text=True, check=True, timeout=60
+        ).stdout
+    except Exception as e:
+        print(f"WARNING: cannot determine changed files ({e}); falling back to full scan.")
+        return None
+    return {os.path.normpath(os.path.join(repo_root, f)) for f in out.split('\0') if f}
+
+def describe_files(paths, repo_root, changed=None):
     """Строки вывода для группы совпадающих файлов: от самого раннего к самому позднему.
     Дата берётся из git (mtime после checkout в CI одинаков у всех файлов и ничего не значит)."""
     items = []
@@ -170,6 +189,8 @@ def describe_files(paths, repo_root):
         else:
             ts = int(os.path.getmtime(p))
             label = f"no git history, mtime {datetime.fromtimestamp(ts, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        if changed is not None and os.path.normpath(p) in changed:
+            label += ", changed in this push/PR"
         items.append((ts, p, label))
     return [f"   {p} ({label})" for _, p, label in sorted(items)]
 
@@ -184,6 +205,10 @@ def main():
     parser.add_argument("repo_root")
     parser.add_argument("--actor", default="", help="GitHub actor who triggered the workflow")
     parser.add_argument("--owner", default="", help="Repository owner username")
+    parser.add_argument("--event-name", default="", help="GitHub event name (push / pull_request)")
+    parser.add_argument("--base-ref", default="", help="Base branch of the pull request")
+    parser.add_argument("--before-sha", default="", help="Commit SHA before the push")
+    parser.add_argument("--all", action="store_true", help="Check all files instead of only changed ones")
     args = parser.parse_args()
 
     # Skip if the push is made by me
@@ -194,6 +219,19 @@ def main():
     print("Starting combined CI plagiarism analysis (EIL v1.1)...")
     violation_found = False
 
+    changed = None if args.all else get_changed_files(
+        args.repo_root, args.event_name, args.base_ref, args.before_sha)
+    if changed is None:
+        print("Mode: full scan of all files.")
+    else:
+        print(f"Mode: only files added/modified in this push/PR ({len(changed)}).")
+        if not changed:
+            print("No added or modified files (e.g. deletion only). Nothing to check.")
+            sys.exit(0)
+
+    def is_changed(path):
+        return changed is None or os.path.normpath(path) in changed
+
     target_paths = []
     for root, dirs, _ in os.walk(args.repo_root):
         if any(p in root for p in ['.git', '.github', '.vscode', 'TESTS', 'UTILS', 'central-tools']):
@@ -203,6 +241,11 @@ def main():
                 target_paths.append(os.path.join(root, sub_dir))
 
     for target_path in target_paths:
+        if changed is not None:
+            prefix = os.path.normpath(target_path) + os.sep
+            if not any(c.startswith(prefix) for c in changed):
+                continue
+
         parent = os.path.dirname(target_path)
         grandparent = os.path.dirname(parent)
         examples_path = os.path.join(grandparent, 'EXAMPLES')
@@ -222,7 +265,7 @@ def main():
             s_logic = student_logic.get(s_path)
 
             if s_exact:
-                for l_path, l_exact in lecture_exact.items():
+                for l_path, l_exact in (lecture_exact.items() if is_changed(s_path) else ()):
                     if s_exact == l_exact:
                         print("CRITICAL EIL v1.1 VIOLATION: Functions copied from instructor examples!")
                         print(f"Student file: {s_path}\nLecture file: {l_path}\n")
@@ -230,7 +273,7 @@ def main():
                 exact_groups[s_exact].append(s_path)
 
             if s_logic:
-                for l_path, l_logic in lecture_logic.items():
+                for l_path, l_logic in (lecture_logic.items() if is_changed(s_path) else ()):
                     if s_logic == l_logic:
                         print("CRITICAL EIL v1.1 VIOLATION: Logic structure copied from instructor examples!")
                         print(f"Student file: {s_path}\nLecture file: {l_path}\n")
@@ -238,17 +281,17 @@ def main():
                 logic_groups[s_logic].append(s_path)
 
         for sig, paths in exact_groups.items():
-            if len(paths) > 1:
+            if len(paths) > 1 and any(is_changed(p) for p in paths):
                 print(f"PLAGIARISM DETECTED (Exact function match) in folder {target_path}:")
-                for line in describe_files(paths, args.repo_root):
+                for line in describe_files(paths, args.repo_root, changed):
                     print(line)
                 print("-" * 50)
                 violation_found = True
 
         for sig, paths in logic_groups.items():
-            if len(paths) > 1:
+            if len(paths) > 1 and any(is_changed(p) for p in paths):
                 print(f"PLAGIARISM DETECTED (Logic match with token substitution) in folder {target_path}:")
-                for line in describe_files(paths, args.repo_root):
+                for line in describe_files(paths, args.repo_root, changed):
                     print(line)
                 print("-" * 50)
                 violation_found = True

@@ -29,7 +29,13 @@ jobs:
         env:
           ACTOR: ${{ github.actor }}
           OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           python3 central-tools/UTILS/ci_plagiarism_hunter.py . \
             --actor "$ACTOR" \
-            --owner "$OWNER"
+            --owner "$OWNER" \
+            --event-name "$EVENT_NAME" \
+            --base-ref "$BASE_REF" \
+            --before-sha "$BEFORE_SHA"
