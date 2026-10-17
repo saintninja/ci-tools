@@ -1,0 +1,35 @@
+name: Centralized EIL v1.1 Plagiarism Hunter
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  hunt-plagiarism:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout central tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ci-tools
+          path: central-tools
+          sparse-checkout: UTILS
+          persist-credentials: false
+
+      - name: Run Hunter Engine
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          python3 central-tools/UTILS/ci_plagiarism_hunter.py . \
+            --actor "$ACTOR" \
+            --owner "$OWNER"

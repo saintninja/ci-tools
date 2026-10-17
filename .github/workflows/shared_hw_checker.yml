@@ -1,0 +1,53 @@
+name: Centralized Homework Checker
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout central tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ci-tools
+          path: central-tools
+          persist-credentials: false
+
+      - name: Make central scripts executable
+        run: chmod +x central-tools/SCRIPTS/*.sh
+
+      - name: Find changed cpp files
+        id: find-files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          ./central-tools/SCRIPTS/find_changed_files.sh \
+            "$EVENT_NAME" \
+            "$BASE_REF" \
+            "$BEFORE_SHA"
+
+      - name: Compile and Run Tests
+        if: steps.find-files.outputs.files != ''
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+        run: |
+          ./central-tools/SCRIPTS/run_homework_tests.sh "$FILES"
+
+      - name: Check Code Style
+        if: ${{ !cancelled() && steps.find-files.outputs.files != '' }}
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+        run: |
+          ./central-tools/SCRIPTS/check_style.sh "$FILES"
