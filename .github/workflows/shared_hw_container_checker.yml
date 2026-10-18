@@ -1,0 +1,98 @@
+name: Centralized Header Tests
+
+on:
+  workflow_call:
+    inputs:
+      hw:
+        description: "Test homeworks with header only dev"
+        required: true
+        type: string
+      test_file:
+        description: "Test file name inside TESTS/HOMEWORKS/<hw>/"
+        required: false
+        type: string
+        default: test.cpp
+      checks:
+        description: >-
+          Expected checks as "key[:Label],key2[:Label2],...". Keys must match the names the test
+          prints in its RESULT line. Without it the report is built from whatever the test printed;
+          with it, checks missing from the output (compile error, timeout) are reported as FAIL.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test-headers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout central tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ci-tools
+          path: central-tools
+          sparse-checkout: SCRIPTS
+          persist-credentials: false
+
+      - name: Make central scripts executable
+        run: chmod +x central-tools/SCRIPTS/*.sh
+
+      - name: Find changed h/hpp files
+        id: find-files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HW: ${{ inputs.hw }}
+        run: |
+          ./central-tools/SCRIPTS/find_changed_files.sh \
+            "$EVENT_NAME" "$BASE_REF" "$BEFORE_SHA" \
+            "^HOMEWORKS/${HW}/.*\.(h|hpp)$"
+
+      - name: Compile and test each submission
+        if: steps.find-files.outputs.files != ''
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+          HW: ${{ inputs.hw }}
+          TEST_NAME: ${{ inputs.test_file }}
+          CHECKS: ${{ inputs.checks }}
+        run: |
+          TEST_FILE="TESTS/HOMEWORKS/${HW}/${TEST_NAME}"
+          if [ ! -f "$TEST_FILE" ]; then
+            echo "::error::Test file not found: $TEST_FILE"
+            exit 1
+          fi
+
+          mkdir -p test_results
+
+          while IFS= read -r header_file; do
+            [ -z "$header_file" ] && continue
+
+            echo "::group::Processing: $header_file"
+            result_name="${header_file//[\/.]/_}"
+            ./central-tools/SCRIPTS/test_submission.sh \
+              "$header_file" "$TEST_FILE" "test_results/${result_name}_result.txt" "$CHECKS" || true
+            echo "::endgroup::"
+          done <<< "$FILES"
+
+      - name: Upload test results
+        if: ${{ !cancelled() && hashFiles('test_results/*.txt') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ inputs.hw }}
+          path: test_results/
+          retention-days: 30
+
+      - name: Generate individual reports
+        if: ${{ !cancelled() && hashFiles('test_results/*.txt') != '' }}
+        env:
+          CHECKS: ${{ inputs.checks }}
+        run: ./central-tools/SCRIPTS/generate_report.sh test_results "$CHECKS"
