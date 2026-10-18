@@ -143,7 +143,6 @@ def scan_folder(folder_path):
     return exact_map, logic_map
 
 def first_commit_info(path: str, repo_root: str):
-    """(unix_ts, author) самого раннего коммита, добавившего файл, либо None."""
     try:
         rel = os.path.relpath(path, repo_root)
         out = subprocess.run(
@@ -160,22 +159,37 @@ def first_commit_info(path: str, repo_root: str):
 
 ZERO_SHA = '0' * 40
 
+def _git_changed_names(repo_root, diff_args):
+    r = subprocess.run(
+        ['git', '-C', repo_root, 'diff', '--name-only', '--diff-filter=ACMR', '-z', *diff_args],
+        capture_output=True, text=True, timeout=60
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"git exited with code {r.returncode}")
+    return {os.path.normpath(os.path.join(repo_root, f)) for f in r.stdout.split('\0') if f}
+
 def get_changed_files(repo_root, event_name, base_ref, before_sha):
+    candidates = []
     if event_name == 'pull_request' and base_ref:
-        diff_args = [f'origin/{base_ref}...HEAD']
-    elif event_name != 'pull_request' and before_sha and before_sha != ZERO_SHA:
-        diff_args = [before_sha, 'HEAD']
-    else:
+        candidates.append([f'origin/{base_ref}...HEAD'])
+    elif event_name == 'push' and before_sha and before_sha != ZERO_SHA:
+        candidates.append([before_sha, 'HEAD'])
+    elif event_name not in ('push', 'pull_request'):
         return None
-    try:
-        out = subprocess.run(
-            ['git', '-C', repo_root, 'diff', '--name-only', '--diff-filter=ACMR', '-z', *diff_args],
-            capture_output=True, text=True, check=True, timeout=60
-        ).stdout
-    except Exception as e:
-        print(f"WARNING: cannot determine changed files ({e}); falling back to full scan.")
-        return None
-    return {os.path.normpath(os.path.join(repo_root, f)) for f in out.split('\0') if f}
+    candidates.append(['HEAD~1', 'HEAD'])  # изменения последнего коммита (относительно первого родителя)
+
+    errors = []
+    for diff_args in candidates:
+        try:
+            files = _git_changed_names(repo_root, diff_args)
+        except Exception as e:
+            errors.append(f"git diff {' '.join(diff_args)}: {e}")
+            continue
+        if errors:
+            print(f"::warning::{errors[0]}")
+            print("::warning::Base commit unavailable; checking only files changed in the last commit.")
+        return files
+    raise RuntimeError(' | '.join(errors))
 
 def describe_files(paths, repo_root, changed=None):
     """Строки вывода для группы совпадающих файлов: от самого раннего к самому позднему.
@@ -219,8 +233,19 @@ def main():
     print("Starting combined CI plagiarism analysis (EIL v1.1)...")
     violation_found = False
 
-    changed = None if args.all else get_changed_files(
-        args.repo_root, args.event_name, args.base_ref, args.before_sha)
+    changed = None
+    if not args.all:
+        try:
+            changed = get_changed_files(
+                args.repo_root, args.event_name, args.base_ref, args.before_sha)
+        except RuntimeError as e:
+            print(f"::error::Cannot determine changed files: {e}")
+            shallow = subprocess.run(['git', '-C', args.repo_root, 'rev-parse', '--is-shallow-repository'],
+                                     capture_output=True, text=True).stdout.strip()
+            if shallow == 'true':
+                print("Hint: the repository is a shallow clone; use actions/checkout with fetch-depth: 0.")
+            print("Run with --all to check every file.")
+            sys.exit(1)
     if changed is None:
         print("Mode: full scan of all files.")
     else:
@@ -255,6 +280,8 @@ def main():
         if os.path.isdir(examples_path):
             lecture_exact, lecture_logic = scan_folder(examples_path)
 
+        print(f"Checking folder {target_path} against "
+              f"{examples_path if os.path.isdir(examples_path) else '(no EXAMPLES folder)'}")
         student_exact, student_logic = scan_folder(target_path)
 
         exact_groups = defaultdict(list)
