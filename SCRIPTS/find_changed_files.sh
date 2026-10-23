@@ -6,7 +6,7 @@ BASE_REF="${2:-}"
 BEFORE_SHA="${3:-}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-/dev/stdout}"
 
-PATTERN='^PROGRAMMING/HOMEWORKS/HW_[0-9]+/.*\.cpp$'
+PATTERN='^(PROGRAMMING/)?HOMEWORKS/HW_[0-9]+/.*\.(cpp|h|hpp)$'
 
 if [ "$EVENT_NAME" = "pull_request" ]; then
     BASE="origin/${BASE_REF}"
